@@ -150,29 +150,43 @@ export default function QRTool() {
         img.src = url;
       });
 
-      // Helper function to try jsQR
-      const tryDecode = (imageData: ImageData, label: string): string | null => {
-        const code = jsQR(imageData.data, imageData.width, imageData.height, {
-          inversionAttempts: "attemptBoth",
+      // Helper with timeout to prevent hanging
+      const tryDecodeWithTimeout = (imageData: ImageData, label: string, timeoutMs: number = 3000): Promise<string | null> => {
+        return new Promise((resolve) => {
+          const timer = setTimeout(() => {
+            console.warn(`⏱️ Timeout for ${label}`);
+            resolve(null);
+          }, timeoutMs);
+
+          try {
+            const code = jsQR(imageData.data, imageData.width, imageData.height, {
+              inversionAttempts: "attemptBoth",
+            });
+            clearTimeout(timer);
+            if (code) {
+              console.log(`✅ Decoded with ${label}`);
+              resolve(code.data);
+            } else {
+              resolve(null);
+            }
+          } catch (e) {
+            clearTimeout(timer);
+            resolve(null);
+          }
         });
-        if (code) {
-          console.log(`✅ Decoded with ${label}`);
-          return code.data;
-        }
-        return null;
       };
 
       // Fast grayscale conversion
       const toGrayscale = (imageData: ImageData): ImageData => {
         const data = new Uint8ClampedArray(imageData.data);
         for (let i = 0; i < data.length; i += 4) {
-          const gray = (data[i] + data[i + 1] + data[i + 2]) / 3; // Fast average
+          const gray = (data[i] + data[i + 1] + data[i + 2]) / 3;
           data[i] = data[i + 1] = data[i + 2] = gray;
         }
         return new ImageData(data, imageData.width, imageData.height);
       };
 
-      // Fast simple threshold (much faster than Otsu)
+      // Fast simple threshold
       const simpleThreshold = (imageData: ImageData, threshold: number = 128): ImageData => {
         const data = new Uint8ClampedArray(imageData.data);
         for (let i = 0; i < data.length; i += 4) {
@@ -183,12 +197,11 @@ export default function QRTool() {
         return new ImageData(data, imageData.width, imageData.height);
       };
 
-      // Fast contrast stretch (like WeChat)
+      // Fast contrast stretch
       const autoContrast = (imageData: ImageData): ImageData => {
         const data = new Uint8ClampedArray(imageData.data);
         let min = 255, max = 0;
         
-        // Find min/max quickly
         for (let i = 0; i < data.length; i += 4) {
           const gray = (data[i] + data[i + 1] + data[i + 2]) / 3;
           if (gray < min) min = gray;
@@ -215,9 +228,8 @@ export default function QRTool() {
         throw new Error("Canvas not supported");
       }
 
-      // WeChat-style optimization: aggressively downscale for speed
-      // Most QR codes work well at 800-1200px max dimension
-      const maxDim = 1000;
+      // Aggressive downscale for speed - 800px is sweet spot
+      const maxDim = 800;
       let width = img.width;
       let height = img.height;
       
@@ -234,8 +246,8 @@ export default function QRTool() {
 
       setStatus("Decoding…");
 
-      // Strategy 1: Try original (works for clear QR codes) - 50% success
-      let result = tryDecode(imgData, "original");
+      // Strategy 1: Original (fastest)
+      let result = await tryDecodeWithTimeout(imgData, "original", 2000);
       if (result) {
         setDecoded(result);
         setStatus("Decoded ✅");
@@ -244,8 +256,8 @@ export default function QRTool() {
         return;
       }
 
-      // Strategy 2: Auto contrast (WeChat's key technique) - 30% success
-      result = tryDecode(autoContrast(imgData), "auto-contrast");
+      // Strategy 2: Auto contrast (WeChat's technique)
+      result = await tryDecodeWithTimeout(autoContrast(imgData), "auto-contrast", 2000);
       if (result) {
         setDecoded(result);
         setStatus("Decoded ✅");
@@ -254,21 +266,20 @@ export default function QRTool() {
         return;
       }
 
-      // Strategy 3: Grayscale - 5% success
-      result = tryDecode(toGrayscale(imgData), "grayscale");
-      if (result) {
-        setDecoded(result);
-        setStatus("Decoded ✅");
-        navigator.vibrate?.(50);
-        URL.revokeObjectURL(url);
-        return;
-      }
+      // Strategy 3: Try multiple approaches in parallel for speed
+      setStatus("Advanced scan…");
+      
+      const promises = [
+        tryDecodeWithTimeout(toGrayscale(imgData), "grayscale", 2000),
+        tryDecodeWithTimeout(simpleThreshold(imgData, 120), "threshold-120", 2000),
+        tryDecodeWithTimeout(simpleThreshold(imgData, 140), "threshold-140", 2000),
+      ];
 
-      // Strategy 4: Try multiple thresholds quickly - 10% success
-      for (const threshold of [100, 140, 160]) {
-        result = tryDecode(simpleThreshold(imgData, threshold), `threshold-${threshold}`);
-        if (result) {
-          setDecoded(result);
+      // Race: whoever finishes first wins
+      const results = await Promise.all(promises);
+      for (const res of results) {
+        if (res) {
+          setDecoded(res);
           setStatus("Decoded ✅");
           navigator.vibrate?.(50);
           URL.revokeObjectURL(url);
@@ -276,45 +287,51 @@ export default function QRTool() {
         }
       }
 
-      // Strategy 5: Try 1.5x scale (last quick attempt) - 3% success
+      // Strategy 4: Try different scale
+      setStatus("Multi-scale…");
       canvas.width = width * 1.5;
       canvas.height = height * 1.5;
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
       const scaled = ctx.getImageData(0, 0, canvas.width, canvas.height);
       
-      result = tryDecode(scaled, "1.5x");
-      if (result) {
-        setDecoded(result);
-        setStatus("Decoded ✅");
-        navigator.vibrate?.(50);
-        URL.revokeObjectURL(url);
-        return;
+      const scalePromises = [
+        tryDecodeWithTimeout(scaled, "1.5x", 2000),
+        tryDecodeWithTimeout(autoContrast(scaled), "1.5x-contrast", 2000),
+      ];
+
+      const scaleResults = await Promise.all(scalePromises);
+      for (const res of scaleResults) {
+        if (res) {
+          setDecoded(res);
+          setStatus("Decoded ✅");
+          navigator.vibrate?.(50);
+          URL.revokeObjectURL(url);
+          return;
+        }
       }
 
-      result = tryDecode(autoContrast(scaled), "1.5x-contrast");
-      if (result) {
-        setDecoded(result);
-        setStatus("Decoded ✅");
-        navigator.vibrate?.(50);
-        URL.revokeObjectURL(url);
-        return;
-      }
-
-      // Last resort: ZXing
-      setStatus("Trying backup decoder…");
+      // Last resort: ZXing with timeout
+      setStatus("Backup decoder…");
       try {
-        const zxingResult = await reader.decodeFromImageElement(img);
-        setDecoded(zxingResult.getText());
-        setStatus("Decoded ✅");
-        navigator.vibrate?.(50);
-        URL.revokeObjectURL(url);
-        return;
+        const zxingPromise = reader.decodeFromImageElement(img);
+        const timeoutPromise = new Promise<null>((resolve) => 
+          setTimeout(() => resolve(null), 3000)
+        );
+        
+        const zxingResult = await Promise.race([zxingPromise, timeoutPromise]);
+        if (zxingResult) {
+          setDecoded(zxingResult.getText());
+          setStatus("Decoded ✅");
+          navigator.vibrate?.(50);
+          URL.revokeObjectURL(url);
+          return;
+        }
       } catch (e) {
         console.warn("ZXing failed:", e);
       }
 
       URL.revokeObjectURL(url);
-      throw new Error("Could not decode QR code. Try cropping closer to the QR code or taking a clearer photo.");
+      throw new Error("Could not decode QR code. The QR code may be too damaged, blurry, or have severe distortion. Try cropping closer or taking a clearer photo.");
       
     } catch (e: any) {
       setStatus("Failed to decode image");
