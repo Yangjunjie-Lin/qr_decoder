@@ -150,51 +150,144 @@ export default function QRTool() {
         img.src = url;
       });
 
-      // Helper with timeout to prevent hanging
-      const tryDecodeWithTimeout = (imageData: ImageData, label: string, timeoutMs: number = 3000): Promise<string | null> => {
-        return new Promise((resolve) => {
-          const timer = setTimeout(() => {
-            console.warn(`⏱️ Timeout for ${label}`);
-            resolve(null);
-          }, timeoutMs);
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
+      
+      if (!ctx) {
+        throw new Error("Canvas not supported");
+      }
 
-          try {
-            const code = jsQR(imageData.data, imageData.width, imageData.height, {
-              inversionAttempts: "attemptBoth",
-            });
-            clearTimeout(timer);
-            if (code) {
-              console.log(`✅ Decoded with ${label}`);
-              resolve(code.data);
-            } else {
-              resolve(null);
+      // Step 1: Create a small preview for fast QR detection
+      const previewSize = 400; // Very small for speed
+      const scale = previewSize / Math.max(img.width, img.height);
+      const previewWidth = Math.floor(img.width * scale);
+      const previewHeight = Math.floor(img.height * scale);
+      
+      canvas.width = previewWidth;
+      canvas.height = previewHeight;
+      ctx.drawImage(img, 0, 0, previewWidth, previewHeight);
+      const previewData = ctx.getImageData(0, 0, previewWidth, previewHeight);
+
+      // Fast QR region detection using edge density
+      const detectQRRegion = (imageData: ImageData): { x: number, y: number, width: number, height: number } | null => {
+        const data = imageData.data;
+        const width = imageData.width;
+        const height = imageData.height;
+        const gridSize = 20; // Divide into 20x20 grid
+        const cellWidth = Math.floor(width / gridSize);
+        const cellHeight = Math.floor(height / gridSize);
+        
+        let maxDensity = 0;
+        let bestX = 0, bestY = 0;
+        
+        // Find area with highest edge density (likely QR code)
+        for (let gy = 0; gy < gridSize - 4; gy++) {
+          for (let gx = 0; gx < gridSize - 4; gx++) {
+            let density = 0;
+            
+            // Check 5x5 cell area
+            for (let dy = 0; dy < 5; dy++) {
+              for (let dx = 0; dx < 5; dx++) {
+                const cx = (gx + dx) * cellWidth;
+                const cy = (gy + dy) * cellHeight;
+                
+                // Sample center of cell
+                const px = Math.min(cx + cellWidth / 2, width - 1);
+                const py = Math.min(cy + cellHeight / 2, height - 1);
+                const idx = (py * width + px) * 4;
+                
+                const gray = (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
+                
+                // Check horizontal edge
+                if (px < width - 1) {
+                  const rightIdx = (py * width + px + 1) * 4;
+                  const rightGray = (data[rightIdx] + data[rightIdx + 1] + data[rightIdx + 2]) / 3;
+                  density += Math.abs(gray - rightGray);
+                }
+                
+                // Check vertical edge
+                if (py < height - 1) {
+                  const downIdx = ((py + 1) * width + px) * 4;
+                  const downGray = (data[downIdx] + data[downIdx + 1] + data[downIdx + 2]) / 3;
+                  density += Math.abs(gray - downGray);
+                }
+              }
             }
-          } catch (e) {
-            clearTimeout(timer);
-            resolve(null);
+            
+            if (density > maxDensity) {
+              maxDensity = density;
+              bestX = gx;
+              bestY = gy;
+            }
           }
-        });
+        }
+        
+        // If found high-density area, return it with padding
+        if (maxDensity > 1000) {
+          const padding = 1; // Add 1 cell padding
+          return {
+            x: Math.max(0, (bestX - padding) * cellWidth),
+            y: Math.max(0, (bestY - padding) * cellHeight),
+            width: Math.min((5 + padding * 2) * cellWidth, width),
+            height: Math.min((5 + padding * 2) * cellHeight, height)
+          };
+        }
+        
+        return null;
       };
 
-      // Fast grayscale conversion
-      const toGrayscale = (imageData: ImageData): ImageData => {
-        const data = new Uint8ClampedArray(imageData.data);
-        for (let i = 0; i < data.length; i += 4) {
-          const gray = (data[i] + data[i + 1] + data[i + 2]) / 3;
-          data[i] = data[i + 1] = data[i + 2] = gray;
-        }
-        return new ImageData(data, imageData.width, imageData.height);
-      };
+      setStatus("Detecting QR region…");
+      const region = detectQRRegion(previewData);
+      
+      let targetWidth, targetHeight, targetX = 0, targetY = 0;
+      
+      if (region) {
+        // Scale region back to original image coordinates
+        const scaleBack = 1 / scale;
+        targetX = Math.floor(region.x * scaleBack);
+        targetY = Math.floor(region.y * scaleBack);
+        targetWidth = Math.floor(region.width * scaleBack);
+        targetHeight = Math.floor(region.height * scaleBack);
+        
+        console.log(`🎯 QR region detected: ${targetWidth}x${targetHeight} at (${targetX}, ${targetY})`);
+      } else {
+        // No region detected, use center crop
+        const size = Math.min(img.width, img.height);
+        targetX = (img.width - size) / 2;
+        targetY = (img.height - size) / 2;
+        targetWidth = size;
+        targetHeight = size;
+        
+        console.log("📍 Using center crop");
+      }
 
-      // Fast simple threshold
-      const simpleThreshold = (imageData: ImageData, threshold: number = 128): ImageData => {
-        const data = new Uint8ClampedArray(imageData.data);
-        for (let i = 0; i < data.length; i += 4) {
-          const gray = (data[i] + data[i + 1] + data[i + 2]) / 3;
-          const value = gray > threshold ? 255 : 0;
-          data[i] = data[i + 1] = data[i + 2] = value;
+      // Step 2: Process only the detected region at good resolution
+      const maxRegionSize = 800;
+      const regionScale = Math.min(1, maxRegionSize / Math.max(targetWidth, targetHeight));
+      const finalWidth = Math.floor(targetWidth * regionScale);
+      const finalHeight = Math.floor(targetHeight * regionScale);
+      
+      canvas.width = finalWidth;
+      canvas.height = finalHeight;
+      ctx.drawImage(img, targetX, targetY, targetWidth, targetHeight, 0, 0, finalWidth, finalHeight);
+      const croppedData = ctx.getImageData(0, 0, finalWidth, finalHeight);
+
+      setStatus("Decoding region…");
+
+      // Fast decode helper
+      const tryDecode = (imageData: ImageData, label: string): string | null => {
+        try {
+          const code = jsQR(imageData.data, imageData.width, imageData.height, {
+            inversionAttempts: "attemptBoth",
+          });
+          if (code) {
+            console.log(`✅ Decoded with ${label}`);
+            return code.data;
+          }
+        } catch (e) {
+          console.warn(`Failed ${label}:`, e);
         }
-        return new ImageData(data, imageData.width, imageData.height);
+        return null;
       };
 
       // Fast contrast stretch
@@ -209,11 +302,11 @@ export default function QRTool() {
         }
         
         const range = max - min;
-        if (range > 0) {
+        if (range > 10) {
           const scale = 255 / range;
           for (let i = 0; i < data.length; i += 4) {
             const gray = (data[i] + data[i + 1] + data[i + 2]) / 3;
-            const stretched = (gray - min) * scale;
+            const stretched = Math.round((gray - min) * scale);
             data[i] = data[i + 1] = data[i + 2] = stretched;
           }
         }
@@ -221,33 +314,19 @@ export default function QRTool() {
         return new ImageData(data, imageData.width, imageData.height);
       };
 
-      const canvas = document.createElement("canvas");
-      const ctx = canvas.getContext("2d");
-      
-      if (!ctx) {
-        throw new Error("Canvas not supported");
-      }
+      // Simple threshold
+      const simpleThreshold = (imageData: ImageData, threshold: number): ImageData => {
+        const data = new Uint8ClampedArray(imageData.data);
+        for (let i = 0; i < data.length; i += 4) {
+          const gray = (data[i] + data[i + 1] + data[i + 2]) / 3;
+          const value = gray > threshold ? 255 : 0;
+          data[i] = data[i + 1] = data[i + 2] = value;
+        }
+        return new ImageData(data, imageData.width, imageData.height);
+      };
 
-      // Aggressive downscale for speed - 800px is sweet spot
-      const maxDim = 800;
-      let width = img.width;
-      let height = img.height;
-      
-      if (width > maxDim || height > maxDim) {
-        const scale = maxDim / Math.max(width, height);
-        width = Math.floor(width * scale);
-        height = Math.floor(height * scale);
-      }
-
-      canvas.width = width;
-      canvas.height = height;
-      ctx.drawImage(img, 0, 0, width, height);
-      const imgData = ctx.getImageData(0, 0, width, height);
-
-      setStatus("Decoding…");
-
-      // Strategy 1: Original (fastest)
-      let result = await tryDecodeWithTimeout(imgData, "original", 2000);
+      // Try original
+      let result = tryDecode(croppedData, "cropped-original");
       if (result) {
         setDecoded(result);
         setStatus("Decoded ✅");
@@ -256,8 +335,8 @@ export default function QRTool() {
         return;
       }
 
-      // Strategy 2: Auto contrast (WeChat's technique)
-      result = await tryDecodeWithTimeout(autoContrast(imgData), "auto-contrast", 2000);
+      // Try auto contrast
+      result = tryDecode(autoContrast(croppedData), "cropped-contrast");
       if (result) {
         setDecoded(result);
         setStatus("Decoded ✅");
@@ -266,20 +345,11 @@ export default function QRTool() {
         return;
       }
 
-      // Strategy 3: Try multiple approaches in parallel for speed
-      setStatus("Advanced scan…");
-      
-      const promises = [
-        tryDecodeWithTimeout(toGrayscale(imgData), "grayscale", 2000),
-        tryDecodeWithTimeout(simpleThreshold(imgData, 120), "threshold-120", 2000),
-        tryDecodeWithTimeout(simpleThreshold(imgData, 140), "threshold-140", 2000),
-      ];
-
-      // Race: whoever finishes first wins
-      const results = await Promise.all(promises);
-      for (const res of results) {
-        if (res) {
-          setDecoded(res);
+      // Try thresholds
+      for (const threshold of [115, 140, 165]) {
+        result = tryDecode(simpleThreshold(croppedData, threshold), `threshold-${threshold}`);
+        if (result) {
+          setDecoded(result);
           setStatus("Decoded ✅");
           navigator.vibrate?.(50);
           URL.revokeObjectURL(url);
@@ -287,22 +357,31 @@ export default function QRTool() {
         }
       }
 
-      // Strategy 4: Try different scale
-      setStatus("Multi-scale…");
-      canvas.width = width * 1.5;
-      canvas.height = height * 1.5;
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      const scaled = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      
-      const scalePromises = [
-        tryDecodeWithTimeout(scaled, "1.5x", 2000),
-        tryDecodeWithTimeout(autoContrast(scaled), "1.5x-contrast", 2000),
-      ];
-
-      const scaleResults = await Promise.all(scalePromises);
-      for (const res of scaleResults) {
-        if (res) {
-          setDecoded(res);
+      // If region detection failed, try full image as fallback
+      if (!region) {
+        setStatus("Trying full image…");
+        const fullSize = 600;
+        const fullScale = fullSize / Math.max(img.width, img.height);
+        const fullWidth = Math.floor(img.width * fullScale);
+        const fullHeight = Math.floor(img.height * fullScale);
+        
+        canvas.width = fullWidth;
+        canvas.height = fullHeight;
+        ctx.drawImage(img, 0, 0, fullWidth, fullHeight);
+        const fullData = ctx.getImageData(0, 0, fullWidth, fullHeight);
+        
+        result = tryDecode(fullData, "full-image");
+        if (result) {
+          setDecoded(result);
+          setStatus("Decoded ✅");
+          navigator.vibrate?.(50);
+          URL.revokeObjectURL(url);
+          return;
+        }
+        
+        result = tryDecode(autoContrast(fullData), "full-contrast");
+        if (result) {
+          setDecoded(result);
           setStatus("Decoded ✅");
           navigator.vibrate?.(50);
           URL.revokeObjectURL(url);
@@ -310,28 +389,21 @@ export default function QRTool() {
         }
       }
 
-      // Last resort: ZXing with timeout
+      // Last resort: ZXing
       setStatus("Backup decoder…");
       try {
-        const zxingPromise = reader.decodeFromImageElement(img);
-        const timeoutPromise = new Promise<null>((resolve) => 
-          setTimeout(() => resolve(null), 3000)
-        );
-        
-        const zxingResult = await Promise.race([zxingPromise, timeoutPromise]);
-        if (zxingResult) {
-          setDecoded(zxingResult.getText());
-          setStatus("Decoded ✅");
-          navigator.vibrate?.(50);
-          URL.revokeObjectURL(url);
-          return;
-        }
+        const zxingResult = await reader.decodeFromImageElement(img);
+        setDecoded(zxingResult.getText());
+        setStatus("Decoded ✅");
+        navigator.vibrate?.(50);
+        URL.revokeObjectURL(url);
+        return;
       } catch (e) {
         console.warn("ZXing failed:", e);
       }
 
       URL.revokeObjectURL(url);
-      throw new Error("Could not decode QR code. The QR code may be too damaged, blurry, or have severe distortion. Try cropping closer or taking a clearer photo.");
+      throw new Error("Could not decode QR code. Try: 1) Crop closer to QR code, 2) Ensure QR code is clearly visible, 3) Check if QR code is damaged");
       
     } catch (e: any) {
       setStatus("Failed to decode image");
