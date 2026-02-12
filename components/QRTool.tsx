@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { BrowserQRCodeReader, IScannerControls } from "@zxing/browser";
+import jsQR from "jsqr";
 
 type Mode = "camera" | "upload";
 
@@ -149,29 +150,87 @@ export default function QRTool() {
         img.src = url;
       });
 
-      setStatus("Decoding image…");
+      setStatus("Decoding with jsQR…");
       
+      // Try jsQR first (better for static images)
       try {
-        // Use decodeFromImageElement for better reliability
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+        
+        if (!ctx) {
+          throw new Error("Canvas not supported");
+        }
+
+        // Set canvas size to match image
+        canvas.width = img.width;
+        canvas.height = img.height;
+        
+        // Draw image to canvas
+        ctx.drawImage(img, 0, 0);
+        
+        // Get image data
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        
+        // Decode with jsQR
+        const code = jsQR(imageData.data, imageData.width, imageData.height, {
+          inversionAttempts: "dontInvert",
+        });
+        
+        if (code) {
+          setDecoded(code.data);
+          setStatus("Decoded ✅");
+          navigator.vibrate?.(50);
+          URL.revokeObjectURL(url);
+          return;
+        }
+        
+        // Try with inversion if first attempt failed
+        setStatus("Retrying with inversion…");
+        const codeInverted = jsQR(imageData.data, imageData.width, imageData.height, {
+          inversionAttempts: "attemptBoth",
+        });
+        
+        if (codeInverted) {
+          setDecoded(codeInverted.data);
+          setStatus("Decoded ✅");
+          navigator.vibrate?.(50);
+          URL.revokeObjectURL(url);
+          return;
+        }
+      } catch (jsQRError) {
+        console.warn("jsQR failed:", jsQRError);
+      }
+
+      // Fallback to ZXing if jsQR fails
+      setStatus("Trying ZXing decoder…");
+      try {
         const result = await reader.decodeFromImageElement(img);
         const text = result.getText();
         setDecoded(text);
         setStatus("Decoded ✅");
         navigator.vibrate?.(50);
-      } catch (decodeError: any) {
-        // If decoding fails, try with the URL method as fallback
-        try {
-          const result = await reader.decodeFromImageUrl(url);
-          const text = result.getText();
-          setDecoded(text);
-          setStatus("Decoded ✅");
-          navigator.vibrate?.(50);
-        } catch (fallbackError: any) {
-          throw new Error("No QR code found in image. Try a clearer image or crop closer to the QR code.");
-        }
-      } finally {
         URL.revokeObjectURL(url);
+        return;
+      } catch (zxingError) {
+        console.warn("ZXing failed:", zxingError);
       }
+
+      // Try URL method as last resort
+      try {
+        const result = await reader.decodeFromImageUrl(url);
+        const text = result.getText();
+        setDecoded(text);
+        setStatus("Decoded ✅");
+        navigator.vibrate?.(50);
+        URL.revokeObjectURL(url);
+        return;
+      } catch (urlError) {
+        console.warn("URL method failed:", urlError);
+      }
+
+      URL.revokeObjectURL(url);
+      throw new Error("No QR code found. Please ensure the image is clear and the QR code is visible.");
+      
     } catch (e: any) {
       setStatus("Failed to decode image");
       setLastError(String(e?.message || e));
