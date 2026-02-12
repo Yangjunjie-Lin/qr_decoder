@@ -324,14 +324,26 @@ export default function QRTool() {
         throw new Error("Canvas not supported");
       }
 
-      // === PHASE 1: Quick attempts with original size (most likely to succeed) ===
-      setStatus("Phase 1: Quick scan…");
-      canvas.width = img.width;
-      canvas.height = img.height;
-      ctx.drawImage(img, 0, 0);
+      // Optimize image size for faster processing (limit to max 2000px on longest side)
+      const maxDimension = 2000;
+      let workingWidth = img.width;
+      let workingHeight = img.height;
+      
+      if (img.width > maxDimension || img.height > maxDimension) {
+        const scale = maxDimension / Math.max(img.width, img.height);
+        workingWidth = Math.floor(img.width * scale);
+        workingHeight = Math.floor(img.height * scale);
+        console.log(`Downscaling image from ${img.width}x${img.height} to ${workingWidth}x${workingHeight} for faster processing`);
+      }
+
+      // === PHASE 1: Ultra-fast attempts (< 1 second) ===
+      setStatus("Decoding…");
+      canvas.width = workingWidth;
+      canvas.height = workingHeight;
+      ctx.drawImage(img, 0, 0, workingWidth, workingHeight);
       const originalData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       
-      // Try original first (fastest path)
+      // Try original first (fastest path - works for ~70% of clear QR codes)
       let result = tryJsQRWithProcessing(originalData, "original");
       if (result) {
         setDecoded(result);
@@ -341,17 +353,7 @@ export default function QRTool() {
         return;
       }
       
-      // Try Otsu (best for low contrast)
-      result = tryJsQRWithProcessing(otsuThreshold(originalData), "Otsu");
-      if (result) {
-        setDecoded(result);
-        setStatus("Decoded ✅");
-        navigator.vibrate?.(50);
-        URL.revokeObjectURL(url);
-        return;
-      }
-      
-      // Try extreme contrast
+      // Try extreme contrast (fast and effective for low contrast)
       result = tryJsQRWithProcessing(extremeContrast(originalData), "extreme contrast");
       if (result) {
         setDecoded(result);
@@ -361,20 +363,33 @@ export default function QRTool() {
         return;
       }
 
-      // === PHASE 2: Scaled attempts (if quick scan failed) ===
-      setStatus("Phase 2: Multi-scale processing…");
-      const priorityScales = [1.5, 2, 0.75]; // Most effective scales
+      // === PHASE 2: Advanced processing (2-3 seconds) ===
+      setStatus("Advanced processing…");
+      
+      // Try Otsu (slower but very effective for gray-on-gray)
+      result = tryJsQRWithProcessing(otsuThreshold(originalData), "Otsu");
+      if (result) {
+        setDecoded(result);
+        setStatus("Decoded ✅");
+        navigator.vibrate?.(50);
+        URL.revokeObjectURL(url);
+        return;
+      }
+
+      // === PHASE 3: Multi-scale (if still not found) ===
+      setStatus("Multi-scale scan…");
+      const priorityScales = [1.5, 2]; // Reduced to 2 most effective scales
       
       for (const scale of priorityScales) {
-        canvas.width = img.width * scale;
-        canvas.height = img.height * scale;
+        canvas.width = workingWidth * scale;
+        canvas.height = workingHeight * scale;
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
         
         const scaledData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         
-        // Try Otsu first (highest success rate)
-        result = tryJsQRWithProcessing(otsuThreshold(scaledData), `${scale}x Otsu`);
+        // Try original at this scale
+        result = tryJsQRWithProcessing(scaledData, `${scale}x`);
         if (result) {
           setDecoded(result);
           setStatus("Decoded ✅");
@@ -383,7 +398,7 @@ export default function QRTool() {
           return;
         }
         
-        // Try extreme contrast
+        // Try extreme contrast at this scale
         result = tryJsQRWithProcessing(extremeContrast(scaledData), `${scale}x extreme`);
         if (result) {
           setDecoded(result);
@@ -393,52 +408,45 @@ export default function QRTool() {
           return;
         }
         
-        // Try adaptive with optimal window size
-        result = tryJsQRWithProcessing(adaptiveThreshold(scaledData, 15), `${scale}x adaptive`);
-        if (result) {
-          setDecoded(result);
-          setStatus("Decoded ✅");
-          navigator.vibrate?.(50);
-          URL.revokeObjectURL(url);
-          return;
+        // Try Otsu at this scale (only if scale is reasonable)
+        if (scale <= 2) {
+          result = tryJsQRWithProcessing(otsuThreshold(scaledData), `${scale}x Otsu`);
+          if (result) {
+            setDecoded(result);
+            setStatus("Decoded ✅");
+            navigator.vibrate?.(50);
+            URL.revokeObjectURL(url);
+            return;
+          }
         }
       }
 
-      // === PHASE 3: Advanced processing (for difficult images) ===
-      setStatus("Phase 3: Advanced processing…");
-      canvas.width = img.width;
-      canvas.height = img.height;
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(img, 0, 0);
-      const data = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      // === PHASE 4: Last resort techniques (complex backgrounds) ===
+      setStatus("Final attempt…");
       
-      // Try different contrast levels with Otsu
-      for (const contrast of [80, 100]) {
-        const highContrast = enhanceContrast(data, contrast);
-        result = tryJsQRWithProcessing(otsuThreshold(highContrast), `contrast${contrast}+Otsu`);
-        if (result) {
-          setDecoded(result);
-          setStatus("Decoded ✅");
-          navigator.vibrate?.(50);
-          URL.revokeObjectURL(url);
-          return;
-        }
+      // Try adaptive threshold (slowest but handles complex backgrounds)
+      result = tryJsQRWithProcessing(adaptiveThreshold(originalData, 15), "adaptive");
+      if (result) {
+        setDecoded(result);
+        setStatus("Decoded ✅");
+        navigator.vibrate?.(50);
+        URL.revokeObjectURL(url);
+        return;
       }
       
-      // Try adaptive with different window sizes
-      for (const windowSize of [10, 20]) {
-        result = tryJsQRWithProcessing(adaptiveThreshold(data, windowSize), `adaptive${windowSize}`);
-        if (result) {
-          setDecoded(result);
-          setStatus("Decoded ✅");
-          navigator.vibrate?.(50);
-          URL.revokeObjectURL(url);
-          return;
-        }
+      // Try enhanced contrast + Otsu
+      const highContrast = enhanceContrast(originalData, 100);
+      result = tryJsQRWithProcessing(otsuThreshold(highContrast), "contrast+Otsu");
+      if (result) {
+        setDecoded(result);
+        setStatus("Decoded ✅");
+        navigator.vibrate?.(50);
+        URL.revokeObjectURL(url);
+        return;
       }
 
-      // === PHASE 4: Fallback to ZXing ===
-      setStatus("Phase 4: ZXing decoder…");
+      // === PHASE 5: ZXing fallback ===
+      setStatus("ZXing decoder…");
       try {
         const zxingResult = await reader.decodeFromImageElement(img);
         const text = zxingResult.getText();
