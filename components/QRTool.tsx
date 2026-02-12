@@ -128,16 +128,47 @@ export default function QRTool() {
 
     if (!file) return;
 
+    // Validate file type
+    if (!file.type.startsWith("image/")) {
+      setStatus("Failed to decode image");
+      setLastError("Please select a valid image file");
+      return;
+    }
+
     try {
-      setStatus("Decoding image…");
+      setStatus("Loading image…");
+      
+      // Create an image element to load the file
+      const img = new Image();
       const url = URL.createObjectURL(file);
+      
+      // Wait for image to load
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error("Failed to load image"));
+        img.src = url;
+      });
+
+      setStatus("Decoding image…");
+      
       try {
-        // decodeFromImageUrl reads an image and decodes QR from it
-        const result = await reader.decodeFromImageUrl(url);
+        // Use decodeFromImageElement for better reliability
+        const result = await reader.decodeFromImageElement(img);
         const text = result.getText();
         setDecoded(text);
         setStatus("Decoded ✅");
         navigator.vibrate?.(50);
+      } catch (decodeError: any) {
+        // If decoding fails, try with the URL method as fallback
+        try {
+          const result = await reader.decodeFromImageUrl(url);
+          const text = result.getText();
+          setDecoded(text);
+          setStatus("Decoded ✅");
+          navigator.vibrate?.(50);
+        } catch (fallbackError: any) {
+          throw new Error("No QR code found in image. Try a clearer image or crop closer to the QR code.");
+        }
       } finally {
         URL.revokeObjectURL(url);
       }
@@ -262,12 +293,19 @@ export default function QRTool() {
                 borderRadius: 12,
                 border: "1px dashed rgba(255,255,255,0.25)",
                 background: "rgba(255,255,255,0.05)",
-                color: "#eaf0ff"
+                color: "#eaf0ff",
+                cursor: "pointer"
               }}
             />
           </div>
-          <div className="small" style={{ marginTop: 10 }}>
-            Pick a QR image from your album. Cropping tightly to the QR area improves success rate.
+          <div className="small" style={{ marginTop: 10, lineHeight: "1.6" }}>
+            <strong>Tips for better results:</strong>
+            <ul style={{ marginTop: 6, marginLeft: 20, marginBottom: 0 }}>
+              <li>Use clear, well-lit images</li>
+              <li>Crop close to the QR code area</li>
+              <li>Ensure the QR code is not blurry or distorted</li>
+              <li>Avoid glare or shadows on the QR code</li>
+            </ul>
           </div>
         </>
       )}
