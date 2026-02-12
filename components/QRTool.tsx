@@ -150,58 +150,175 @@ export default function QRTool() {
         img.src = url;
       });
 
-      setStatus("Decoding with jsQR…");
-      
-      // Try jsQR first (better for static images)
-      try {
-        const canvas = document.createElement("canvas");
-        const ctx = canvas.getContext("2d");
-        
-        if (!ctx) {
-          throw new Error("Canvas not supported");
-        }
-
-        // Set canvas size to match image
-        canvas.width = img.width;
-        canvas.height = img.height;
-        
-        // Draw image to canvas
-        ctx.drawImage(img, 0, 0);
-        
-        // Get image data
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        
-        // Decode with jsQR
-        const code = jsQR(imageData.data, imageData.width, imageData.height, {
-          inversionAttempts: "dontInvert",
-        });
-        
-        if (code) {
-          setDecoded(code.data);
-          setStatus("Decoded ✅");
-          navigator.vibrate?.(50);
-          URL.revokeObjectURL(url);
-          return;
-        }
-        
-        // Try with inversion if first attempt failed
-        setStatus("Retrying with inversion…");
-        const codeInverted = jsQR(imageData.data, imageData.width, imageData.height, {
+      // Helper function to try jsQR with different image processing techniques
+      const tryJsQRWithProcessing = (imageData: ImageData, label: string): string | null => {
+        // Try normal
+        let code = jsQR(imageData.data, imageData.width, imageData.height, {
           inversionAttempts: "attemptBoth",
         });
+        if (code) {
+          console.log(`Decoded with ${label} (normal)`);
+          return code.data;
+        }
+        return null;
+      };
+
+      // Helper function to enhance contrast
+      const enhanceContrast = (imageData: ImageData, contrast: number): ImageData => {
+        const data = new Uint8ClampedArray(imageData.data);
+        const factor = (259 * (contrast + 255)) / (255 * (259 - contrast));
         
-        if (codeInverted) {
-          setDecoded(codeInverted.data);
+        for (let i = 0; i < data.length; i += 4) {
+          data[i] = factor * (data[i] - 128) + 128;     // R
+          data[i + 1] = factor * (data[i + 1] - 128) + 128; // G
+          data[i + 2] = factor * (data[i + 2] - 128) + 128; // B
+        }
+        
+        return new ImageData(data, imageData.width, imageData.height);
+      };
+
+      // Helper function to convert to grayscale and adjust brightness
+      const processImage = (imageData: ImageData, brightnessAdjust: number = 0): ImageData => {
+        const data = new Uint8ClampedArray(imageData.data);
+        
+        for (let i = 0; i < data.length; i += 4) {
+          // Convert to grayscale using luminance formula
+          const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+          const adjusted = Math.max(0, Math.min(255, gray + brightnessAdjust));
+          data[i] = data[i + 1] = data[i + 2] = adjusted;
+        }
+        
+        return new ImageData(data, imageData.width, imageData.height);
+      };
+
+      // Helper function to apply adaptive threshold (local binarization)
+      const adaptiveThreshold = (imageData: ImageData): ImageData => {
+        const data = new Uint8ClampedArray(imageData.data);
+        const width = imageData.width;
+        const height = imageData.height;
+        const windowSize = 15; // Size of local window
+        
+        // First convert to grayscale
+        for (let i = 0; i < data.length; i += 4) {
+          const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+          data[i] = data[i + 1] = data[i + 2] = gray;
+        }
+        
+        const output = new Uint8ClampedArray(data.length);
+        
+        for (let y = 0; y < height; y++) {
+          for (let x = 0; x < width; x++) {
+            let sum = 0;
+            let count = 0;
+            
+            // Calculate local mean
+            for (let wy = -windowSize; wy <= windowSize; wy++) {
+              for (let wx = -windowSize; wx <= windowSize; wx++) {
+                const ny = y + wy;
+                const nx = x + wx;
+                if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+                  const idx = (ny * width + nx) * 4;
+                  sum += data[idx];
+                  count++;
+                }
+              }
+            }
+            
+            const mean = sum / count;
+            const idx = (y * width + x) * 4;
+            const threshold = mean * 0.95; // Slightly below mean
+            const value = data[idx] > threshold ? 255 : 0;
+            
+            output[idx] = output[idx + 1] = output[idx + 2] = value;
+            output[idx + 3] = 255;
+          }
+        }
+        
+        return new ImageData(output, width, height);
+      };
+
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
+      
+      if (!ctx) {
+        throw new Error("Canvas not supported");
+      }
+
+      // Try multiple sizes - sometimes scaling helps
+      const scales = [1, 0.5, 1.5, 2];
+      
+      for (const scale of scales) {
+        canvas.width = img.width * scale;
+        canvas.height = img.height * scale;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        
+        const originalData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        
+        setStatus(`Trying scale ${scale}x - original…`);
+        let result = tryJsQRWithProcessing(originalData, `scale ${scale}x`);
+        if (result) {
+          setDecoded(result);
           setStatus("Decoded ✅");
           navigator.vibrate?.(50);
           URL.revokeObjectURL(url);
           return;
         }
-      } catch (jsQRError) {
-        console.warn("jsQR failed:", jsQRError);
+        
+        // Try with grayscale
+        setStatus(`Trying scale ${scale}x - grayscale…`);
+        const grayData = processImage(originalData);
+        result = tryJsQRWithProcessing(grayData, `scale ${scale}x grayscale`);
+        if (result) {
+          setDecoded(result);
+          setStatus("Decoded ✅");
+          navigator.vibrate?.(50);
+          URL.revokeObjectURL(url);
+          return;
+        }
+        
+        // Try with contrast enhancement
+        setStatus(`Trying scale ${scale}x - high contrast…`);
+        const highContrast = enhanceContrast(originalData, 50);
+        result = tryJsQRWithProcessing(highContrast, `scale ${scale}x high contrast`);
+        if (result) {
+          setDecoded(result);
+          setStatus("Decoded ✅");
+          navigator.vibrate?.(50);
+          URL.revokeObjectURL(url);
+          return;
+        }
+        
+        // Try with adaptive threshold (best for difficult backgrounds)
+        if (scale === 1 || scale === 1.5) { // Only on some scales to save time
+          setStatus(`Trying scale ${scale}x - adaptive threshold…`);
+          const adaptiveData = adaptiveThreshold(originalData);
+          result = tryJsQRWithProcessing(adaptiveData, `scale ${scale}x adaptive`);
+          if (result) {
+            setDecoded(result);
+            setStatus("Decoded ✅");
+            navigator.vibrate?.(50);
+            URL.revokeObjectURL(url);
+            return;
+          }
+        }
+        
+        // Try brightness adjustments
+        for (const brightness of [20, -20, 40, -40]) {
+          setStatus(`Trying scale ${scale}x - brightness ${brightness > 0 ? '+' : ''}${brightness}…`);
+          const brightData = processImage(originalData, brightness);
+          result = tryJsQRWithProcessing(brightData, `scale ${scale}x bright ${brightness}`);
+          if (result) {
+            setDecoded(result);
+            setStatus("Decoded ✅");
+            navigator.vibrate?.(50);
+            URL.revokeObjectURL(url);
+            return;
+          }
+        }
       }
 
-      // Fallback to ZXing if jsQR fails
+      // Fallback to ZXing if jsQR fails with all attempts
       setStatus("Trying ZXing decoder…");
       try {
         const result = await reader.decodeFromImageElement(img);
@@ -229,7 +346,7 @@ export default function QRTool() {
       }
 
       URL.revokeObjectURL(url);
-      throw new Error("No QR code found. Please ensure the image is clear and the QR code is visible.");
+      throw new Error("Could not decode QR code after trying multiple methods. The image may be too blurry, small, or the QR code is damaged.");
       
     } catch (e: any) {
       setStatus("Failed to decode image");
