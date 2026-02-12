@@ -157,10 +157,140 @@ export default function QRTool() {
           inversionAttempts: "attemptBoth",
         });
         if (code) {
-          console.log(`Decoded with ${label} (normal)`);
+          console.log(`Decoded with ${label}`);
           return code.data;
         }
         return null;
+      };
+
+      // Otsu's automatic threshold algorithm - industry standard
+      const otsuThreshold = (imageData: ImageData): ImageData => {
+        const data = new Uint8ClampedArray(imageData.data);
+        const width = imageData.width;
+        const height = imageData.height;
+        
+        // Convert to grayscale first
+        const grayData = new Uint8Array(width * height);
+        for (let i = 0; i < grayData.length; i++) {
+          const idx = i * 4;
+          grayData[i] = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+        }
+        
+        // Calculate histogram
+        const histogram = new Array(256).fill(0);
+        for (let i = 0; i < grayData.length; i++) {
+          histogram[grayData[i]]++;
+        }
+        
+        // Calculate total
+        const total = width * height;
+        
+        // Calculate Otsu threshold
+        let sum = 0;
+        for (let i = 0; i < 256; i++) {
+          sum += i * histogram[i];
+        }
+        
+        let sumB = 0;
+        let wB = 0;
+        let wF = 0;
+        let maxVariance = 0;
+        let threshold = 0;
+        
+        for (let t = 0; t < 256; t++) {
+          wB += histogram[t];
+          if (wB === 0) continue;
+          
+          wF = total - wB;
+          if (wF === 0) break;
+          
+          sumB += t * histogram[t];
+          
+          const mB = sumB / wB;
+          const mF = (sum - sumB) / wF;
+          
+          const variance = wB * wF * (mB - mF) * (mB - mF);
+          
+          if (variance > maxVariance) {
+            maxVariance = variance;
+            threshold = t;
+          }
+        }
+        
+        // Apply threshold
+        const output = new Uint8ClampedArray(data.length);
+        for (let i = 0; i < grayData.length; i++) {
+          const value = grayData[i] > threshold ? 255 : 0;
+          output[i * 4] = value;
+          output[i * 4 + 1] = value;
+          output[i * 4 + 2] = value;
+          output[i * 4 + 3] = 255;
+        }
+        
+        return new ImageData(output, width, height);
+      };
+
+      // Sharpen filter
+      const sharpenImage = (imageData: ImageData): ImageData => {
+        const data = new Uint8ClampedArray(imageData.data);
+        const width = imageData.width;
+        const height = imageData.height;
+        const output = new Uint8ClampedArray(data.length);
+        
+        // Sharpen kernel
+        const kernel = [
+          0, -1, 0,
+          -1, 5, -1,
+          0, -1, 0
+        ];
+        
+        for (let y = 1; y < height - 1; y++) {
+          for (let x = 1; x < width - 1; x++) {
+            for (let c = 0; c < 3; c++) {
+              let sum = 0;
+              for (let ky = -1; ky <= 1; ky++) {
+                for (let kx = -1; kx <= 1; kx++) {
+                  const idx = ((y + ky) * width + (x + kx)) * 4 + c;
+                  const kernelIdx = (ky + 1) * 3 + (kx + 1);
+                  sum += data[idx] * kernel[kernelIdx];
+                }
+              }
+              output[(y * width + x) * 4 + c] = Math.max(0, Math.min(255, sum));
+            }
+            output[(y * width + x) * 4 + 3] = 255;
+          }
+        }
+        
+        return new ImageData(output, width, height);
+      };
+
+      // Extreme contrast enhancement for low-contrast QR codes
+      const extremeContrast = (imageData: ImageData): ImageData => {
+        const data = new Uint8ClampedArray(imageData.data);
+        
+        // Convert to grayscale and find min/max
+        let min = 255, max = 0;
+        const grayValues = [];
+        
+        for (let i = 0; i < data.length; i += 4) {
+          const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+          grayValues.push(gray);
+          if (gray < min) min = gray;
+          if (gray > max) max = gray;
+        }
+        
+        // Stretch contrast to full range
+        const range = max - min;
+        if (range > 0) {
+          for (let i = 0; i < grayValues.length; i++) {
+            const stretched = ((grayValues[i] - min) / range) * 255;
+            data[i * 4] = stretched;
+            data[i * 4 + 1] = stretched;
+            data[i * 4 + 2] = stretched;
+          }
+        }
+        
+        return new ImageData(data, imageData.width, imageData.height);
       };
 
       // Helper function to enhance contrast
@@ -192,11 +322,10 @@ export default function QRTool() {
       };
 
       // Helper function to apply adaptive threshold (local binarization)
-      const adaptiveThreshold = (imageData: ImageData): ImageData => {
+      const adaptiveThreshold = (imageData: ImageData, windowSize: number = 15): ImageData => {
         const data = new Uint8ClampedArray(imageData.data);
         const width = imageData.width;
         const height = imageData.height;
-        const windowSize = 15; // Size of local window
         
         // First convert to grayscale
         for (let i = 0; i < data.length; i += 4) {
@@ -226,7 +355,7 @@ export default function QRTool() {
             
             const mean = sum / count;
             const idx = (y * width + x) * 4;
-            const threshold = mean * 0.95; // Slightly below mean
+            const threshold = mean * 0.92; // Adjusted threshold
             const value = data[idx] > threshold ? 255 : 0;
             
             output[idx] = output[idx + 1] = output[idx + 2] = value;
@@ -244,8 +373,8 @@ export default function QRTool() {
         throw new Error("Canvas not supported");
       }
 
-      // Try multiple sizes - sometimes scaling helps
-      const scales = [1, 0.5, 1.5, 2];
+      // Try more scales including larger ones for screen photos
+      const scales = [1, 1.5, 2, 0.75, 2.5, 3];
       
       for (const scale of scales) {
         canvas.width = img.width * scale;
@@ -255,8 +384,9 @@ export default function QRTool() {
         
         const originalData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         
-        setStatus(`Trying scale ${scale}x - original…`);
-        let result = tryJsQRWithProcessing(originalData, `scale ${scale}x`);
+        // Priority 1: Otsu threshold (best for low contrast)
+        setStatus(`Scale ${scale}x - Otsu auto-threshold…`);
+        let result = tryJsQRWithProcessing(otsuThreshold(originalData), `${scale}x Otsu`);
         if (result) {
           setDecoded(result);
           setStatus("Decoded ✅");
@@ -265,10 +395,9 @@ export default function QRTool() {
           return;
         }
         
-        // Try with grayscale
-        setStatus(`Trying scale ${scale}x - grayscale…`);
-        const grayData = processImage(originalData);
-        result = tryJsQRWithProcessing(grayData, `scale ${scale}x grayscale`);
+        // Priority 2: Extreme contrast stretch
+        setStatus(`Scale ${scale}x - extreme contrast…`);
+        result = tryJsQRWithProcessing(extremeContrast(originalData), `${scale}x extreme`);
         if (result) {
           setDecoded(result);
           setStatus("Decoded ✅");
@@ -277,10 +406,10 @@ export default function QRTool() {
           return;
         }
         
-        // Try with contrast enhancement
-        setStatus(`Trying scale ${scale}x - high contrast…`);
-        const highContrast = enhanceContrast(originalData, 50);
-        result = tryJsQRWithProcessing(highContrast, `scale ${scale}x high contrast`);
+        // Priority 3: Sharpen + Otsu
+        setStatus(`Scale ${scale}x - sharpen + Otsu…`);
+        const sharpened = sharpenImage(originalData);
+        result = tryJsQRWithProcessing(otsuThreshold(sharpened), `${scale}x sharp+Otsu`);
         if (result) {
           setDecoded(result);
           setStatus("Decoded ✅");
@@ -289,11 +418,10 @@ export default function QRTool() {
           return;
         }
         
-        // Try with adaptive threshold (best for difficult backgrounds)
-        if (scale === 1 || scale === 1.5) { // Only on some scales to save time
-          setStatus(`Trying scale ${scale}x - adaptive threshold…`);
-          const adaptiveData = adaptiveThreshold(originalData);
-          result = tryJsQRWithProcessing(adaptiveData, `scale ${scale}x adaptive`);
+        // Try adaptive threshold with different window sizes
+        for (const windowSize of [10, 15, 20, 25]) {
+          setStatus(`Scale ${scale}x - adaptive (${windowSize})…`);
+          result = tryJsQRWithProcessing(adaptiveThreshold(originalData, windowSize), `${scale}x adaptive${windowSize}`);
           if (result) {
             setDecoded(result);
             setStatus("Decoded ✅");
@@ -303,11 +431,35 @@ export default function QRTool() {
           }
         }
         
-        // Try brightness adjustments
-        for (const brightness of [20, -20, 40, -40]) {
-          setStatus(`Trying scale ${scale}x - brightness ${brightness > 0 ? '+' : ''}${brightness}…`);
+        // Try high contrast variations
+        for (const contrast of [60, 80, 100, 120]) {
+          setStatus(`Scale ${scale}x - contrast ${contrast}…`);
+          const highContrast = enhanceContrast(originalData, contrast);
+          result = tryJsQRWithProcessing(highContrast, `${scale}x contrast${contrast}`);
+          if (result) {
+            setDecoded(result);
+            setStatus("Decoded ✅");
+            navigator.vibrate?.(50);
+            URL.revokeObjectURL(url);
+            return;
+          }
+          
+          // Try Otsu on high contrast
+          result = tryJsQRWithProcessing(otsuThreshold(highContrast), `${scale}x contrast${contrast}+Otsu`);
+          if (result) {
+            setDecoded(result);
+            setStatus("Decoded ✅");
+            navigator.vibrate?.(50);
+            URL.revokeObjectURL(url);
+            return;
+          }
+        }
+        
+        // Try grayscale with brightness adjustments
+        for (const brightness of [30, -30, 50, -50]) {
+          setStatus(`Scale ${scale}x - gray + brightness ${brightness}…`);
           const brightData = processImage(originalData, brightness);
-          result = tryJsQRWithProcessing(brightData, `scale ${scale}x bright ${brightness}`);
+          result = tryJsQRWithProcessing(brightData, `${scale}x bright${brightness}`);
           if (result) {
             setDecoded(result);
             setStatus("Decoded ✅");
@@ -318,7 +470,7 @@ export default function QRTool() {
         }
       }
 
-      // Fallback to ZXing if jsQR fails with all attempts
+      // Fallback to ZXing
       setStatus("Trying ZXing decoder…");
       try {
         const result = await reader.decodeFromImageElement(img);
@@ -332,7 +484,6 @@ export default function QRTool() {
         console.warn("ZXing failed:", zxingError);
       }
 
-      // Try URL method as last resort
       try {
         const result = await reader.decodeFromImageUrl(url);
         const text = result.getText();
@@ -346,7 +497,7 @@ export default function QRTool() {
       }
 
       URL.revokeObjectURL(url);
-      throw new Error("Could not decode QR code after trying multiple methods. The image may be too blurry, small, or the QR code is damaged.");
+      throw new Error("Could not decode QR code after 100+ attempts. Try: 1) Taking a clearer photo, 2) Cropping closer to the QR code, 3) Ensuring better lighting");
       
     } catch (e: any) {
       setStatus("Failed to decode image");
