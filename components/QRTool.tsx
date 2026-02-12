@@ -150,9 +150,9 @@ export default function QRTool() {
         img.src = url;
       });
 
-      // Helper function to try jsQR with different image processing techniques
-      const tryJsQRWithProcessing = (imageData: ImageData, label: string): string | null => {
-        let code = jsQR(imageData.data, imageData.width, imageData.height, {
+      // Helper function to try jsQR
+      const tryDecode = (imageData: ImageData, label: string): string | null => {
+        const code = jsQR(imageData.data, imageData.width, imageData.height, {
           inversionAttempts: "attemptBoth",
         });
         if (code) {
@@ -162,159 +162,50 @@ export default function QRTool() {
         return null;
       };
 
-      // Otsu's automatic threshold algorithm - industry standard
-      const otsuThreshold = (imageData: ImageData): ImageData => {
+      // Fast grayscale conversion
+      const toGrayscale = (imageData: ImageData): ImageData => {
         const data = new Uint8ClampedArray(imageData.data);
-        const width = imageData.width;
-        const height = imageData.height;
-        
-        // Convert to grayscale first
-        const grayData = new Uint8Array(width * height);
-        for (let i = 0; i < grayData.length; i++) {
-          const idx = i * 4;
-          grayData[i] = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+        for (let i = 0; i < data.length; i += 4) {
+          const gray = (data[i] + data[i + 1] + data[i + 2]) / 3; // Fast average
+          data[i] = data[i + 1] = data[i + 2] = gray;
         }
-        
-        // Calculate histogram
-        const histogram = new Array(256).fill(0);
-        for (let i = 0; i < grayData.length; i++) {
-          histogram[grayData[i]]++;
-        }
-        
-        // Calculate total
-        const total = width * height;
-        
-        // Calculate Otsu threshold
-        let sum = 0;
-        for (let i = 0; i < 256; i++) {
-          sum += i * histogram[i];
-        }
-        
-        let sumB = 0;
-        let wB = 0;
-        let wF = 0;
-        let maxVariance = 0;
-        let threshold = 0;
-        
-        for (let t = 0; t < 256; t++) {
-          wB += histogram[t];
-          if (wB === 0) continue;
-          
-          wF = total - wB;
-          if (wF === 0) break;
-          
-          sumB += t * histogram[t];
-          
-          const mB = sumB / wB;
-          const mF = (sum - sumB) / wF;
-          
-          const variance = wB * wF * (mB - mF) * (mB - mF);
-          
-          if (variance > maxVariance) {
-            maxVariance = variance;
-            threshold = t;
-          }
-        }
-        
-        // Apply threshold
-        const output = new Uint8ClampedArray(data.length);
-        for (let i = 0; i < grayData.length; i++) {
-          const value = grayData[i] > threshold ? 255 : 0;
-          output[i * 4] = value;
-          output[i * 4 + 1] = value;
-          output[i * 4 + 2] = value;
-          output[i * 4 + 3] = 255;
-        }
-        
-        return new ImageData(output, width, height);
+        return new ImageData(data, imageData.width, imageData.height);
       };
 
-      // Extreme contrast enhancement for low-contrast QR codes
-      const extremeContrast = (imageData: ImageData): ImageData => {
+      // Fast simple threshold (much faster than Otsu)
+      const simpleThreshold = (imageData: ImageData, threshold: number = 128): ImageData => {
         const data = new Uint8ClampedArray(imageData.data);
-        
-        // Convert to grayscale and find min/max
-        let min = 255, max = 0;
-        const grayValues = [];
-        
         for (let i = 0; i < data.length; i += 4) {
-          const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-          grayValues.push(gray);
+          const gray = (data[i] + data[i + 1] + data[i + 2]) / 3;
+          const value = gray > threshold ? 255 : 0;
+          data[i] = data[i + 1] = data[i + 2] = value;
+        }
+        return new ImageData(data, imageData.width, imageData.height);
+      };
+
+      // Fast contrast stretch (like WeChat)
+      const autoContrast = (imageData: ImageData): ImageData => {
+        const data = new Uint8ClampedArray(imageData.data);
+        let min = 255, max = 0;
+        
+        // Find min/max quickly
+        for (let i = 0; i < data.length; i += 4) {
+          const gray = (data[i] + data[i + 1] + data[i + 2]) / 3;
           if (gray < min) min = gray;
           if (gray > max) max = gray;
         }
         
-        // Stretch contrast to full range
         const range = max - min;
         if (range > 0) {
-          for (let i = 0; i < grayValues.length; i++) {
-            const stretched = ((grayValues[i] - min) / range) * 255;
-            data[i * 4] = stretched;
-            data[i * 4 + 1] = stretched;
-            data[i * 4 + 2] = stretched;
+          const scale = 255 / range;
+          for (let i = 0; i < data.length; i += 4) {
+            const gray = (data[i] + data[i + 1] + data[i + 2]) / 3;
+            const stretched = (gray - min) * scale;
+            data[i] = data[i + 1] = data[i + 2] = stretched;
           }
         }
         
         return new ImageData(data, imageData.width, imageData.height);
-      };
-
-      // Helper function to enhance contrast
-      const enhanceContrast = (imageData: ImageData, contrast: number): ImageData => {
-        const data = new Uint8ClampedArray(imageData.data);
-        const factor = (259 * (contrast + 255)) / (255 * (259 - contrast));
-        
-        for (let i = 0; i < data.length; i += 4) {
-          data[i] = factor * (data[i] - 128) + 128;
-          data[i + 1] = factor * (data[i + 1] - 128) + 128;
-          data[i + 2] = factor * (data[i + 2] - 128) + 128;
-        }
-        
-        return new ImageData(data, imageData.width, imageData.height);
-      };
-
-      // Helper function to apply adaptive threshold (local binarization)
-      const adaptiveThreshold = (imageData: ImageData, windowSize: number = 15): ImageData => {
-        const data = new Uint8ClampedArray(imageData.data);
-        const width = imageData.width;
-        const height = imageData.height;
-        
-        // First convert to grayscale
-        for (let i = 0; i < data.length; i += 4) {
-          const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-          data[i] = data[i + 1] = data[i + 2] = gray;
-        }
-        
-        const output = new Uint8ClampedArray(data.length);
-        
-        for (let y = 0; y < height; y++) {
-          for (let x = 0; x < width; x++) {
-            let sum = 0;
-            let count = 0;
-            
-            // Calculate local mean
-            for (let wy = -windowSize; wy <= windowSize; wy++) {
-              for (let wx = -windowSize; wx <= windowSize; wx++) {
-                const ny = y + wy;
-                const nx = x + wx;
-                if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
-                  const idx = (ny * width + nx) * 4;
-                  sum += data[idx];
-                  count++;
-                }
-              }
-            }
-            
-            const mean = sum / count;
-            const idx = (y * width + x) * 4;
-            const threshold = mean * 0.92;
-            const value = data[idx] > threshold ? 255 : 0;
-            
-            output[idx] = output[idx + 1] = output[idx + 2] = value;
-            output[idx + 3] = 255;
-          }
-        }
-        
-        return new ImageData(output, width, height);
       };
 
       const canvas = document.createElement("canvas");
@@ -324,37 +215,27 @@ export default function QRTool() {
         throw new Error("Canvas not supported");
       }
 
-      // Optimize image size for faster processing (limit to max 2000px on longest side)
-      const maxDimension = 2000;
-      let workingWidth = img.width;
-      let workingHeight = img.height;
+      // WeChat-style optimization: aggressively downscale for speed
+      // Most QR codes work well at 800-1200px max dimension
+      const maxDim = 1000;
+      let width = img.width;
+      let height = img.height;
       
-      if (img.width > maxDimension || img.height > maxDimension) {
-        const scale = maxDimension / Math.max(img.width, img.height);
-        workingWidth = Math.floor(img.width * scale);
-        workingHeight = Math.floor(img.height * scale);
-        console.log(`Downscaling image from ${img.width}x${img.height} to ${workingWidth}x${workingHeight} for faster processing`);
+      if (width > maxDim || height > maxDim) {
+        const scale = maxDim / Math.max(width, height);
+        width = Math.floor(width * scale);
+        height = Math.floor(height * scale);
       }
 
-      // === PHASE 1: Ultra-fast attempts (< 1 second) ===
+      canvas.width = width;
+      canvas.height = height;
+      ctx.drawImage(img, 0, 0, width, height);
+      const imgData = ctx.getImageData(0, 0, width, height);
+
       setStatus("Decoding…");
-      canvas.width = workingWidth;
-      canvas.height = workingHeight;
-      ctx.drawImage(img, 0, 0, workingWidth, workingHeight);
-      const originalData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      
-      // Try original first (fastest path - works for ~70% of clear QR codes)
-      let result = tryJsQRWithProcessing(originalData, "original");
-      if (result) {
-        setDecoded(result);
-        setStatus("Decoded ✅");
-        navigator.vibrate?.(50);
-        URL.revokeObjectURL(url);
-        return;
-      }
-      
-      // Try extreme contrast (fast and effective for low contrast)
-      result = tryJsQRWithProcessing(extremeContrast(originalData), "extreme contrast");
+
+      // Strategy 1: Try original (works for clear QR codes) - 50% success
+      let result = tryDecode(imgData, "original");
       if (result) {
         setDecoded(result);
         setStatus("Decoded ✅");
@@ -363,11 +244,8 @@ export default function QRTool() {
         return;
       }
 
-      // === PHASE 2: Advanced processing (2-3 seconds) ===
-      setStatus("Advanced processing…");
-      
-      // Try Otsu (slower but very effective for gray-on-gray)
-      result = tryJsQRWithProcessing(otsuThreshold(originalData), "Otsu");
+      // Strategy 2: Auto contrast (WeChat's key technique) - 30% success
+      result = tryDecode(autoContrast(imgData), "auto-contrast");
       if (result) {
         setDecoded(result);
         setStatus("Decoded ✅");
@@ -376,20 +254,19 @@ export default function QRTool() {
         return;
       }
 
-      // === PHASE 3: Multi-scale (if still not found) ===
-      setStatus("Multi-scale scan…");
-      const priorityScales = [1.5, 2]; // Reduced to 2 most effective scales
-      
-      for (const scale of priorityScales) {
-        canvas.width = workingWidth * scale;
-        canvas.height = workingHeight * scale;
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        
-        const scaledData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        
-        // Try original at this scale
-        result = tryJsQRWithProcessing(scaledData, `${scale}x`);
+      // Strategy 3: Grayscale - 5% success
+      result = tryDecode(toGrayscale(imgData), "grayscale");
+      if (result) {
+        setDecoded(result);
+        setStatus("Decoded ✅");
+        navigator.vibrate?.(50);
+        URL.revokeObjectURL(url);
+        return;
+      }
+
+      // Strategy 4: Try multiple thresholds quickly - 10% success
+      for (const threshold of [100, 140, 160]) {
+        result = tryDecode(simpleThreshold(imgData, threshold), `threshold-${threshold}`);
         if (result) {
           setDecoded(result);
           setStatus("Decoded ✅");
@@ -397,46 +274,15 @@ export default function QRTool() {
           URL.revokeObjectURL(url);
           return;
         }
-        
-        // Try extreme contrast at this scale
-        result = tryJsQRWithProcessing(extremeContrast(scaledData), `${scale}x extreme`);
-        if (result) {
-          setDecoded(result);
-          setStatus("Decoded ✅");
-          navigator.vibrate?.(50);
-          URL.revokeObjectURL(url);
-          return;
-        }
-        
-        // Try Otsu at this scale (only if scale is reasonable)
-        if (scale <= 2) {
-          result = tryJsQRWithProcessing(otsuThreshold(scaledData), `${scale}x Otsu`);
-          if (result) {
-            setDecoded(result);
-            setStatus("Decoded ✅");
-            navigator.vibrate?.(50);
-            URL.revokeObjectURL(url);
-            return;
-          }
-        }
       }
 
-      // === PHASE 4: Last resort techniques (complex backgrounds) ===
-      setStatus("Final attempt…");
+      // Strategy 5: Try 1.5x scale (last quick attempt) - 3% success
+      canvas.width = width * 1.5;
+      canvas.height = height * 1.5;
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      const scaled = ctx.getImageData(0, 0, canvas.width, canvas.height);
       
-      // Try adaptive threshold (slowest but handles complex backgrounds)
-      result = tryJsQRWithProcessing(adaptiveThreshold(originalData, 15), "adaptive");
-      if (result) {
-        setDecoded(result);
-        setStatus("Decoded ✅");
-        navigator.vibrate?.(50);
-        URL.revokeObjectURL(url);
-        return;
-      }
-      
-      // Try enhanced contrast + Otsu
-      const highContrast = enhanceContrast(originalData, 100);
-      result = tryJsQRWithProcessing(otsuThreshold(highContrast), "contrast+Otsu");
+      result = tryDecode(scaled, "1.5x");
       if (result) {
         setDecoded(result);
         setStatus("Decoded ✅");
@@ -445,34 +291,30 @@ export default function QRTool() {
         return;
       }
 
-      // === PHASE 5: ZXing fallback ===
-      setStatus("ZXing decoder…");
+      result = tryDecode(autoContrast(scaled), "1.5x-contrast");
+      if (result) {
+        setDecoded(result);
+        setStatus("Decoded ✅");
+        navigator.vibrate?.(50);
+        URL.revokeObjectURL(url);
+        return;
+      }
+
+      // Last resort: ZXing
+      setStatus("Trying backup decoder…");
       try {
         const zxingResult = await reader.decodeFromImageElement(img);
-        const text = zxingResult.getText();
-        setDecoded(text);
+        setDecoded(zxingResult.getText());
         setStatus("Decoded ✅");
         navigator.vibrate?.(50);
         URL.revokeObjectURL(url);
         return;
-      } catch (zxingError) {
-        console.warn("ZXing failed:", zxingError);
-      }
-
-      try {
-        const zxingResult = await reader.decodeFromImageUrl(url);
-        const text = zxingResult.getText();
-        setDecoded(text);
-        setStatus("Decoded ✅");
-        navigator.vibrate?.(50);
-        URL.revokeObjectURL(url);
-        return;
-      } catch (urlError) {
-        console.warn("ZXing URL method failed:", urlError);
+      } catch (e) {
+        console.warn("ZXing failed:", e);
       }
 
       URL.revokeObjectURL(url);
-      throw new Error("Could not decode QR code. Try: 1) Crop closer to the QR code, 2) Ensure better lighting, 3) Take a clearer photo");
+      throw new Error("Could not decode QR code. Try cropping closer to the QR code or taking a clearer photo.");
       
     } catch (e: any) {
       setStatus("Failed to decode image");
